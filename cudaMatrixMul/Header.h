@@ -4,8 +4,6 @@
 #include <time.h>
 #include <cuda_runtime.h>
 
-//#include "matrixMul_naive.cuh"
-
 using std::cout;
 using std::endl;
 

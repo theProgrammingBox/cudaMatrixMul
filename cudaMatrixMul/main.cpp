@@ -1,117 +1,244 @@
 #include "header.h"
 
-void randomInit(float* data, int size)
+void FillRandom(float* matrix, uint32_t columns, uint32_t rows, uint32_t columnsCeil, uint32_t rowsCeil, uint32_t matrixCeilBytes)
 {
-	for (int i = 0; i < size; ++i)
-		data[i] = rand() / (float)RAND_MAX;
-}
-
-__global__ void matrixMul_unroll(float* C, float* A, float* B, int wA, int wB)
-{
-	int bx = blockIdx.x;
-	int by = blockIdx.y;
-	int tx = threadIdx.x;
-	int ty = threadIdx.y;
-
-	__shared__ float As[BLOCK_SIZE * BLOCK_SIZE];
-
-	float cv[BLOCK_SIZE] = { 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 };
-	int aBegin = wA * BLOCK_SIZE * by;
-	int aEnd = aBegin + wA - 1;
-	int aStep = BLOCK_SIZE;
-	int bBegin = BLOCK_SIZE * VECTOR_SIZE * bx;
-	int bStep = BLOCK_SIZE * wB;
-	int cBegin = wB * BLOCK_SIZE * by + VECTOR_SIZE * BLOCK_SIZE * bx;
-	
-	for (int a = aBegin, b = bBegin; a <= aEnd; a += aStep, b += bStep) {
-		float* Ap = &A[a + wA * ty + tx];
-		float* ap = &As[ty + BLOCK_SIZE * tx];
-#pragma unroll
-		for (int i = 0; i < BLOCK_SIZE; i += VECTOR_SIZE) {
-			ap[i] = Ap[wA * i];
-		}
-		__syncthreads();
-		ap = &As[0];
-		float* bp = &B[b + BLOCK_SIZE * ty + tx];
-#pragma unroll
-		for (int i = 0; i < BLOCK_SIZE; i++) {
-			float bv = bp[0];
-#pragma unroll
-			for (int j = 0; j < BLOCK_SIZE; j++) {
-				cv[j] += ap[j] * bv;
-			}
-			ap += BLOCK_SIZE;
-			bp += wB;
-		}
-		__syncthreads();
-	}
-	float* Cp = &C[cBegin];
-	Cp += BLOCK_SIZE * ty + tx;
-	int cStep = wB;
-#pragma unroll
-	for (int i = 0; i < BLOCK_SIZE; i++) {
-		Cp[0] = cv[i]; Cp += cStep;
-	}
-}
-
-int main() {
-	srand(time(NULL));
-	
-	// 32, 64, 128, 256, 512, 1024
-	uint32_t heightA = BLOCK_SIZE * 256;
-	uint32_t widthA = BLOCK_SIZE * 256;
-	uint32_t widthB = BLOCK_SIZE * 256;
-
-	uint32_t sizeA = heightA * widthA;
-	uint32_t sizeB = widthA * widthB;
-	uint32_t sizeC = heightA * widthB;
-
-	uint32_t memSizeA = sizeof(float) * sizeA;
-	uint32_t memSizeB = sizeof(float) * sizeB;
-	uint32_t memSizeC = sizeof(float) * sizeC;
-
-	float flop = 2.0f * heightA * widthA * widthB;
-
-	float* A = (float*)malloc(memSizeA);
-	float* B = (float*)malloc(memSizeB);
-	float* C = (float*)malloc(memSizeC);
-
-	randomInit(A, sizeA);
-	randomInit(B, sizeB);
-
-	float* gpuA;
-	float* gpuB;
-	float* gpuC;
-
-	cudaMalloc((void**)&gpuA, memSizeA);
-	cudaMalloc((void**)&gpuB, memSizeB);
-	cudaMalloc((void**)&gpuC, memSizeC);
-
-
-
-	dim3 threads, grid;
-	cudaEvent_t start, stop;
-	float msecTotal;
-	
-	int iter = 100;
-	while (iter--)
+	memset(matrix, 0, matrixCeilBytes);
+	for (uint32_t i = 0; i < rows; i++)
 	{
-		cudaEventCreate(&start);
-		cudaEventRecord(start, 0);
+		for (uint32_t j = 0; j < columns; j++)
+		{
+			matrix[i * columnsCeil + j] = randoms.normalRand();
+		}
+	}
+}
 
-		threads = dim3(BLOCK_SIZE, VECTOR_SIZE);
-		grid = dim3(widthB / (BLOCK_SIZE * VECTOR_SIZE), heightA / BLOCK_SIZE);
-		cudaMemcpy(gpuA, A, memSizeA, cudaMemcpyHostToDevice);
-		cudaMemcpy(gpuB, B, memSizeB, cudaMemcpyHostToDevice);
-		matrixMul_unroll << <grid, threads >> > (gpuA, gpuB, gpuC, widthA, widthB);
-		cudaMemcpy(C, gpuC, memSizeC, cudaMemcpyDeviceToHost);
+void PrintMatrix(float* matrix, uint32_t columns, uint32_t rows)
+{
+	for (uint32_t i = 0; i < rows; i++)
+	{
+		for (uint32_t j = 0; j < columns; j++)
+		{
+			cout << matrix[i * columns + j] << " ";
+		}
+		cout << endl;
+	}
+	cout << endl;
+}
 
-		cudaEventCreate(&stop);
-		cudaEventRecord(stop, 0);
-		cudaEventSynchronize(stop);
-		cudaEventElapsedTime(&msecTotal, start, stop);
-		cout << "unrollMatrixMul: " << msecTotal << " ms" << endl;
+void matrixMulCPU(float* inputMatrix, float* weightMatrix, float* outputMatrix, uint32_t columnsA, uint32_t rowsA, uint32_t columnsB)
+{
+	for (uint32_t i = 0; i < rowsA; i++)
+	{
+		for (uint32_t j = 0; j < columnsB; j++)
+		{
+			float sum = 0;
+			for (uint32_t k = 0; k < columnsA; k++)
+			{
+				sum += inputMatrix[i * columnsA + k] * weightMatrix[k * columnsB + j];
+			}
+			outputMatrix[i * columnsB + j] = sum;
+		}
+	}
+}
+
+__global__ void matrixMulGPU(float* inputMatrix, float* weightMatrix, float* outputMatrix, uint32_t columnsA, uint32_t rowsA, uint32_t columnsB)
+{
+	uint32_t row = blockIdx.y * blockDim.y + threadIdx.y;
+	uint32_t col = blockIdx.x * blockDim.x + threadIdx.x;
+
+	if (row < rowsA && col < columnsB)
+	{
+		float sum = 0;
+		for (uint32_t k = 0; k < columnsA; k++)
+		{
+			sum += inputMatrix[row * columnsA + k] * weightMatrix[k * columnsB + col];
+		}
+		outputMatrix[row * columnsB + col] = sum;
+	}
+}
+
+__global__ void MatrixMulGPU(float* inputMatrix, float* weightMatrix, float* outputMatrix, uint32_t columnsA, uint32_t rowsA, uint32_t columnsB)
+{
+	uint32_t threadCol = threadIdx.x;
+	uint32_t threadRow = threadIdx.y;
+	uint32_t blockCol = blockIdx.x;
+	uint32_t blockRow = blockIdx.y;
+
+	__shared__ float inputSubMatrix[BLOCK_SIZE * BLOCK_SIZE];
+	
+	float output[BLOCK_SIZE] = { 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 };
+	
+	uint32_t inputSubMatrixStart = columnsA * BLOCK_SIZE * blockRow;
+	uint32_t inputSubMatrixEnd = inputSubMatrixStart + columnsA - 1;
+	
+	uint32_t weightSubMatrixStart = BLOCK_SIZE * VECTOR_SIZE * blockCol;
+	uint32_t weightSubMatrixStep = BLOCK_SIZE * columnsB;
+
+	uint32_t outputStart = columnsB * BLOCK_SIZE * blockRow + VECTOR_SIZE * BLOCK_SIZE * blockCol;
+	
+	for (uint32_t inputSubMatrixIndex = inputSubMatrixStart, weightSubMatrixIndex = weightSubMatrixStart;
+		inputSubMatrixIndex <= inputSubMatrixEnd;
+		inputSubMatrixIndex += BLOCK_SIZE, weightSubMatrixIndex += weightSubMatrixStep)
+	{
+		float* inputHostSubMatrixPointer = &inputMatrix[inputSubMatrixIndex + columnsA * threadRow + threadCol];
+		float* inputDeviceSubMatrixSharedPointer = &inputSubMatrix[threadRow + BLOCK_SIZE * threadCol];
+#pragma unroll
+		for (uint32_t i = 0; i < 16; i += 4)
+		{
+			inputDeviceSubMatrixSharedPointer[i] = inputHostSubMatrixPointer[columnsA * i];
+		}
+		__syncthreads();
+
+		inputDeviceSubMatrixSharedPointer = &inputSubMatrix[0];
+		float* weightDeviceSubMatrixPointer = &weightMatrix[weightSubMatrixIndex + BLOCK_SIZE * threadRow + threadCol];
+		
+#pragma unroll
+		for (uint32_t i = 0; i < BLOCK_SIZE; i++)
+		{
+			float weightValue = weightDeviceSubMatrixPointer[0];
+#pragma unroll
+			for (uint32_t j = 0; j < BLOCK_SIZE; j++)
+			{
+				output[j] += inputDeviceSubMatrixSharedPointer[j] * weightValue;
+			}
+			inputDeviceSubMatrixSharedPointer += BLOCK_SIZE;
+			weightDeviceSubMatrixPointer += columnsB;
+		}
+		__syncthreads();
 	}
 
+	float* outputDevicePointer = &outputMatrix[outputStart];
+	outputDevicePointer += BLOCK_SIZE * threadRow + threadCol;
+#pragma unroll
+	for (uint32_t i = 0; i < BLOCK_SIZE; i++)
+	{
+		outputDevicePointer[0] = output[i];
+		outputDevicePointer += columnsB;
+	}
+}
+int main()
+{
+	uint32_t inputEntries = 18;
+	uint32_t inputFeatures = 17;
+	uint32_t outputFeatures = 19;
+
+	uint32_t inputMatrixSize = inputFeatures * inputEntries;
+	uint32_t weightMatrixSize = inputFeatures * outputFeatures;
+	uint32_t outputMatrixSize = outputFeatures * inputEntries;
+
+	uint32_t inputEntriesCeilBlocks = ceil((float)inputEntries / BLOCK_SIZE);
+	uint32_t inputFeaturesCeilBlocks = ceil((float)inputFeatures / BLOCK_SIZE);
+	uint32_t outputFeaturesCeilBlocks = ceil((float)outputFeatures / BLOCK_SIZE);
+	
+	uint32_t inputEntriesCeil = inputEntriesCeilBlocks * BLOCK_SIZE;
+	uint32_t inputFeaturesCeil = inputFeaturesCeilBlocks * BLOCK_SIZE;
+	uint32_t outputFeaturesCeil = outputFeaturesCeilBlocks * BLOCK_SIZE;
+	
+	uint32_t inputMatrixCeilSize = inputFeaturesCeil * inputEntriesCeil;
+	uint32_t weightMatrixCeilSize = inputFeaturesCeil * outputFeaturesCeil;
+	uint32_t outputMatrixCeilSize = outputFeaturesCeil * inputEntriesCeil;
+
+	uint32_t inputMatrixCeilBytes = sizeof(float) * inputMatrixCeilSize;
+	uint32_t weightMatrixCeilBytes = sizeof(float) * weightMatrixCeilSize;
+	uint32_t outputMatrixCeilBytes = sizeof(float) * outputMatrixCeilSize;
+
+	float* inputMatrix = (float*)malloc(inputMatrixCeilBytes);
+	float* weightMatrix = (float*)malloc(weightMatrixCeilBytes);
+	float* outputMatrix = (float*)malloc(outputMatrixCeilBytes);
+
+	float* gpuInputMatrix;
+	float* gpuWeightMatrix;
+	float* gpuOutputMatrix;
+
+	cudaMalloc((void**)&gpuInputMatrix, inputMatrixCeilBytes);
+	cudaMalloc((void**)&gpuWeightMatrix, weightMatrixCeilBytes);
+	cudaMalloc((void**)&gpuOutputMatrix, outputMatrixCeilBytes);
+
+	FillRandom(inputMatrix, inputFeatures, inputEntries, inputFeaturesCeil, inputEntriesCeil, inputMatrixCeilBytes);
+	FillRandom(weightMatrix, inputFeatures, outputFeatures, inputFeaturesCeil, outputFeaturesCeil, weightMatrixCeilBytes);
+	PrintMatrix(inputMatrix, inputFeaturesCeil, inputEntriesCeil);
+	PrintMatrix(weightMatrix, inputFeaturesCeil, outputFeaturesCeil);
+
+	
+
+	cudaEvent_t start, stop;
+	float elapsedTime;
+
+	cudaEventCreate(&start);
+	cudaEventRecord(start, 0);
+	
+	matrixMulCPU(inputMatrix, weightMatrix, outputMatrix, inputFeaturesCeil, inputEntriesCeil, outputFeaturesCeil);
+	
+	cudaEventCreate(&stop);
+	cudaEventRecord(stop, 0);
+	cudaEventSynchronize(stop);
+	cudaEventElapsedTime(&elapsedTime, start, stop);
+	cout << "CPU time: " << elapsedTime << endl;
+	PrintMatrix(outputMatrix, outputFeaturesCeil, inputEntriesCeil);
+	float* reference = (float*)malloc(outputMatrixCeilBytes);
+	memcpy(reference, outputMatrix, outputMatrixCeilBytes);
+
+
+
+	cudaEventCreate(&start);
+	cudaEventRecord(start, 0);
+	
+	cudaMemcpy(gpuInputMatrix, inputMatrix, inputMatrixCeilBytes, cudaMemcpyHostToDevice);
+	cudaMemcpy(gpuWeightMatrix, weightMatrix, weightMatrixCeilBytes, cudaMemcpyHostToDevice);
+	
+	dim3 threads = dim3(BLOCK_SIZE, BLOCK_SIZE);
+	dim3 blocks = dim3(inputEntriesCeilBlocks, outputFeaturesCeilBlocks);
+	matrixMulGPU << <blocks, threads >> > (gpuInputMatrix, gpuWeightMatrix, gpuOutputMatrix, inputFeaturesCeil, inputEntriesCeil, outputFeaturesCeil);
+	cudaMemcpy(outputMatrix, gpuOutputMatrix, outputMatrixCeilBytes, cudaMemcpyDeviceToHost);
+	
+	cudaEventCreate(&stop);
+	cudaEventRecord(stop, 0);
+	cudaEventSynchronize(stop);
+	cudaEventElapsedTime(&elapsedTime, start, stop);
+	cout << "GPU time: " << elapsedTime << endl;
+	PrintMatrix(outputMatrix, outputFeaturesCeil, inputEntriesCeil);
+	
+	bool correct = true;
+	for (uint32_t i = 0; i < outputMatrixCeilSize; i++)
+	{
+		if (abs(outputMatrix[i] - reference[i]) > 0.0001)
+		{
+			correct = false;
+			break;
+		}
+	}
+	cout << "Result is " << (correct ? "correct" : "incorrect") << endl;
+
+	
+	
+	cudaEventCreate(&start);
+	cudaEventRecord(start, 0);
+	
+	cudaMemcpy(gpuInputMatrix, inputMatrix, inputMatrixCeilBytes, cudaMemcpyHostToDevice);
+	cudaMemcpy(gpuWeightMatrix, weightMatrix, weightMatrixCeilBytes, cudaMemcpyHostToDevice);
+	
+	dim3 threads2 = dim3(BLOCK_SIZE, BLOCK_SIZE);
+	dim3 blocks2 = dim3(inputEntriesCeilBlocks, outputFeaturesCeilBlocks);
+	MatrixMulGPU << <blocks2, threads2 >> > (gpuInputMatrix, gpuWeightMatrix, gpuOutputMatrix, inputFeaturesCeil, inputEntriesCeil, outputFeaturesCeil);
+	cudaMemcpy(outputMatrix, gpuOutputMatrix, outputMatrixCeilBytes, cudaMemcpyDeviceToHost);
+
+	cudaEventCreate(&stop);
+	cudaEventRecord(stop, 0);
+	cudaEventSynchronize(stop);
+	cudaEventElapsedTime(&elapsedTime, start, stop);
+	cout << "GPU time unroll: " << elapsedTime << endl;
+	PrintMatrix(outputMatrix, outputFeaturesCeil, inputEntriesCeil);
+	
+	correct = true;
+	for (uint32_t i = 0; i < outputMatrixCeilSize; i++)
+	{
+		if (abs(outputMatrix[i] - reference[i]) > 0.0001)
+		{
+			correct = false;
+			break;
+		}
+	}
+	cout << "Result is " << (correct ? "correct" : "incorrect") << endl;
+	
 	return 0;
 }
