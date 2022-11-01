@@ -157,25 +157,57 @@ __global__ void MatrixMulMatrixGPU(float* inputMatrix, float* weightMatrix, floa
 	}
 }
 
-//__global__ void MatrixMulMatrixTransposedGPU(float* inputMatrix, float* weightMatrix, float* outputMatrix, uint32_t inputFeatures, uint32_t outputFeatures)
-//{
-//	uint32_t blockx = blockIdx.x;
-//	uint32_t blocky = blockIdx.y;
-//	uint32_t threadx = threadIdx.x;
-//
-//	__shared__ float inputSubMatrix[BLOCK_SIZE * BLOCK_SIZE];
-//	float outputColumn[BLOCK_SIZE] = { };
-//	float* inputSubMatrixThreadPos;
-//	float* inputMatrixThreadPos;
-//	float* weightMatrixThreadPos;
-//	float* outputMatrixThreadPos;
-//	float weightValue;
-//
-//	uint32_t inputStartIndex = blocky * (inputFeatures * BLOCK_SIZE);
-//	uint32_t inputEndIndex = inputStartIndex + inputFeatures;
-//	uint32_t weightStartIndex = blockx * BLOCK_SIZE;
-//	uint32_t weightIndexIncrement = inputFeatures * BLOCK_SIZE;
-//}
+__global__ void MatrixMulMatrixTransposedGPU(float* inputMatrix, float* weightMatrix, float* outputMatrix, uint32_t inputFeatures, uint32_t outputFeatures)
+{
+	uint32_t blockx = blockIdx.x;
+	uint32_t blocky = blockIdx.y;
+	uint32_t threadx = threadIdx.x;
+
+	__shared__ float inputSubMatrix[BLOCK_SIZE * BLOCK_SIZE];
+	float outputColumn[BLOCK_SIZE] = { };
+	float* inputSubMatrixThreadPos;
+	float* inputMatrixThreadPos;
+	float* weightMatrixThreadPos;
+	float* outputMatrixThreadPos;
+	float weightValue;
+
+	uint32_t inputStartIndex = blocky * (inputFeatures * BLOCK_SIZE);
+	uint32_t inputEndIndex = inputStartIndex + inputFeatures;
+	uint32_t weightStartIndex = blockx * BLOCK_SIZE;
+
+	for (uint32_t inputMatrixIndex = inputStartIndex, weightMatrixIndex = weightStartIndex; inputMatrixIndex < inputEndIndex; inputMatrixIndex += BLOCK_SIZE, weightMatrixIndex += BLOCK_SIZE)
+	{
+		inputSubMatrixThreadPos = (inputSubMatrix)+(BLOCK_SIZE * threadx);
+		inputMatrixThreadPos = (inputMatrix)+(inputMatrixIndex + threadx);
+
+#pragma unroll
+		for (uint32_t i = 0; i < BLOCK_SIZE; i++)  inputSubMatrixThreadPos[i] = inputMatrixThreadPos[inputFeatures * i];
+		__syncthreads();
+
+		inputSubMatrixThreadPos = inputSubMatrix;
+		weightMatrixThreadPos = (weightMatrix)+(weightMatrixIndex + threadx * outputFeatures);
+
+#pragma unroll
+		for (uint32_t i = 0; i < BLOCK_SIZE; i++)
+		{
+			weightValue = weightMatrixThreadPos[0];
+
+#pragma unroll
+			for (uint32_t j = 0; j < BLOCK_SIZE; j++) outputColumn[j] += inputSubMatrixThreadPos[j] * weightValue;
+			inputSubMatrixThreadPos += BLOCK_SIZE;
+			weightMatrixThreadPos++;
+		}
+		__syncthreads();
+	}
+	outputMatrixThreadPos = (outputMatrix)+(outputFeatures * BLOCK_SIZE * blocky) + (BLOCK_SIZE * blockx) + (threadx);
+
+#pragma unroll
+	for (uint32_t i = 0; i < BLOCK_SIZE; i++)
+	{
+		outputMatrixThreadPos[0] = outputColumn[i];
+		outputMatrixThreadPos += outputFeatures;
+	}
+}
 
 int main() {
 	PrintStartup();
@@ -277,6 +309,36 @@ int main() {
 	cout << "MatrixMulMatrixTransposed CPU time: " << msecTotal << " ms" << endl;
 	//PrintMatrix(matrixMulMatrixTransposedRef, inputEntriesUnrounded, inputFeaturesUnrounded, inputFeatures);
 
+
+	
+	cudaEventCreate(&start);
+	cudaEventRecord(start, 0);
+	
+	FillZero(inputMatrix, inputMatrixBytes);
+	cudaMemcpy(inputMatrixGPU, inputMatrix, inputMatrixBytes, cudaMemcpyHostToDevice);
+	cudaMemcpy(weightMatrixGPU, weightMatrix, weightMatrixBytes, cudaMemcpyHostToDevice);
+	cudaMemcpy(outputMatrixGPU, outputMatrix, outputMatrixBytes, cudaMemcpyHostToDevice);
+	threads = dim3(BLOCK_SIZE);
+	blocks = dim3(inputFeatureBlocks, inputEntryBlocks);
+	MatrixMulMatrixTransposedGPU << <blocks, threads >> > (outputMatrixGPU, weightMatrixGPU, inputMatrixGPU, inputFeatures, outputFeatures);
+	cudaMemcpy(inputMatrix, inputMatrixGPU, inputMatrixBytes, cudaMemcpyDeviceToHost);
+	
+	cudaEventCreate(&stop);
+	cudaEventRecord(stop, 0);
+	cudaEventSynchronize(stop);
+	cudaEventElapsedTime(&msecTotal, start, stop);
+	cout << "MatrixMulMatrixTransposed GPU time: " << msecTotal << " ms" << endl;
+	//PrintMatrix(inputMatrix, inputEntriesUnrounded, inputFeaturesUnrounded, inputFeatures);
+	
+	same = true;
+	for (uint32_t i = 0; i < inputEntries * inputFeatures; i++) {
+		if (abs(inputMatrix[i] - matrixMulMatrixTransposedRef[i]) > 0.001) {
+			same = false;
+			cout << i << " " << inputMatrix[i] << " " << matrixMulMatrixTransposedRef[i] << endl;
+			break;
+		}
+	}
+	cout << "The results are " << (same ? "the same" : "different") << endl;
 	free(inputMatrix);
 	free(weightMatrix);
 	free(outputMatrix);
