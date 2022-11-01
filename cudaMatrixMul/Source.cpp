@@ -121,7 +121,7 @@ __global__ void MatrixMulMatrixGPU(float* inputMatrix, float* weightMatrix, floa
 
 	uint32_t inputStartIndex = blocky * (inputFeatures * BLOCK_SIZE);
 	uint32_t inputEndIndex = inputStartIndex + inputFeatures;
-	uint32_t weightStartIndex = blockx * (BLOCK_SIZE * VECTOR_SIZE);
+	uint32_t weightStartIndex = blockx * BLOCK_SIZE;
 	uint32_t weightIndexIncrement = outputFeatures * BLOCK_SIZE;
 
 	for (uint32_t inputMatrixIndex = inputStartIndex, weightMatrixIndex = weightStartIndex; inputMatrixIndex < inputEndIndex; inputMatrixIndex += BLOCK_SIZE, weightMatrixIndex += weightIndexIncrement)
@@ -130,7 +130,7 @@ __global__ void MatrixMulMatrixGPU(float* inputMatrix, float* weightMatrix, floa
 		inputMatrixThreadPos = (inputMatrix)+(inputMatrixIndex + threadx) + (inputFeatures * thready);
 
 #pragma unroll
-		for (uint32_t i = 0; i < BLOCK_SIZE; i += VECTOR_SIZE)  inputSubMatrixThreadPos[i] = inputMatrixThreadPos[inputFeatures * i];
+		for (uint32_t i = 0; i < BLOCK_SIZE; i++)  inputSubMatrixThreadPos[i] = inputMatrixThreadPos[inputFeatures * i];
 		__syncthreads();
 
 		inputSubMatrixThreadPos = inputSubMatrix;
@@ -148,7 +148,7 @@ __global__ void MatrixMulMatrixGPU(float* inputMatrix, float* weightMatrix, floa
 		}
 		__syncthreads();
 	}
-	outputMatrixThreadPos = (outputMatrix)+(outputFeatures * BLOCK_SIZE * blocky) + (VECTOR_SIZE * BLOCK_SIZE * blockx) + (BLOCK_SIZE * thready) + (threadx);
+	outputMatrixThreadPos = (outputMatrix)+(outputFeatures * BLOCK_SIZE * blocky) + (BLOCK_SIZE * blockx) + (BLOCK_SIZE * thready) + (threadx);
 
 #pragma unroll
 	for (uint32_t i = 0; i < BLOCK_SIZE; i++)
@@ -165,17 +165,17 @@ int main() {
 	float msecTotal;
 	dim3 threads, blocks;
 
-	uint32_t inputFeaturesUnrounded = 18;
-	uint32_t inputEntriesUnrounded = 10;
-	uint32_t outputFeaturesUnrounded = 13;
+	uint32_t inputFeaturesUnrounded = 3;
+	uint32_t inputEntriesUnrounded = 1;
+	uint32_t outputFeaturesUnrounded = 2;
 
 	uint32_t inputFeatureBlocks = ceil((float)inputFeaturesUnrounded / BLOCK_SIZE);
 	uint32_t inputEntryBlocks = ceil((float)inputEntriesUnrounded / BLOCK_SIZE);
-	uint32_t outputFeatureBlocks = ceil((float)outputFeaturesUnrounded / (BLOCK_SIZE * VECTOR_SIZE));
+	uint32_t outputFeatureBlocks = ceil((float)outputFeaturesUnrounded / BLOCK_SIZE);
 
 	uint32_t inputFeatures = inputFeatureBlocks * BLOCK_SIZE;
 	uint32_t inputEntries = inputEntryBlocks * BLOCK_SIZE;
-	uint32_t outputFeatures = outputFeatureBlocks * BLOCK_SIZE * VECTOR_SIZE;
+	uint32_t outputFeatures = outputFeatureBlocks * BLOCK_SIZE;
 
 	uint32_t inputMatrixBytes = inputEntries * inputFeatures * sizeof(float);
 	uint32_t weightMatrixBytes = inputFeatures * outputFeatures * sizeof(float);
@@ -184,7 +184,7 @@ int main() {
 	float* inputMatrix = (float*)malloc(inputMatrixBytes);
 	float* weightMatrix = (float*)malloc(weightMatrixBytes);
 	float* outputMatrix = (float*)malloc(outputMatrixBytes);
-	
+
 	float* inputMatrixGPU;
 	float* weightMatrixGPU;
 	float* outputMatrixGPU;
@@ -192,7 +192,7 @@ int main() {
 	cudaMalloc((void**)&inputMatrixGPU, inputMatrixBytes);
 	cudaMalloc((void**)&weightMatrixGPU, weightMatrixBytes);
 	cudaMalloc((void**)&outputMatrixGPU, outputMatrixBytes);
-	
+
 	FillRandom(inputMatrix, inputEntriesUnrounded, inputFeaturesUnrounded, inputEntries, inputFeatures);
 	FillRandom(weightMatrix, inputFeaturesUnrounded, outputFeaturesUnrounded, inputFeatures, outputFeatures);
 
@@ -200,42 +200,43 @@ int main() {
 
 	cudaEventCreate(&start);
 	cudaEventRecord(start, 0);
-	
+
 	float* matrixMulMatrixRef = (float*)malloc(outputMatrixBytes);
 	MatrixMulMatrixCPU(inputMatrix, weightMatrix, matrixMulMatrixRef, inputFeatures, inputEntries, outputFeatures);
-	
+
 	cudaEventCreate(&stop);
 	cudaEventRecord(stop, 0);
 	cudaEventSynchronize(stop);
 	cudaEventElapsedTime(&msecTotal, start, stop);
 	cout << "MatrixMulMatrix CPU time: " << msecTotal << " ms" << endl;
-	PrintMatrix(matrixMulMatrixRef, inputEntriesUnrounded, outputFeaturesUnrounded, outputFeatures);
+	 PrintMatrix(matrixMulMatrixRef, inputEntriesUnrounded, outputFeaturesUnrounded, outputFeatures);
 
 
 
 	cudaEventCreate(&start);
 	cudaEventRecord(start, 0);
-	
+
 	FillZero(outputMatrix, outputMatrixBytes);
 	cudaMemcpy(inputMatrixGPU, inputMatrix, inputMatrixBytes, cudaMemcpyHostToDevice);
 	cudaMemcpy(weightMatrixGPU, weightMatrix, weightMatrixBytes, cudaMemcpyHostToDevice);
 	cudaMemcpy(outputMatrixGPU, outputMatrix, outputMatrixBytes, cudaMemcpyHostToDevice);
-	threads = dim3(BLOCK_SIZE, VECTOR_SIZE);
+	threads = dim3(BLOCK_SIZE);
 	blocks = dim3(outputFeatureBlocks, inputEntryBlocks);
-	MatrixMulMatrixGPU <<<blocks, threads>>> (inputMatrixGPU, weightMatrixGPU, outputMatrixGPU, inputFeatures, outputFeatures);
+	MatrixMulMatrixGPU << <blocks, threads >> > (inputMatrixGPU, weightMatrixGPU, outputMatrixGPU, inputFeatures, outputFeatures);
 	cudaMemcpy(outputMatrix, outputMatrixGPU, outputMatrixBytes, cudaMemcpyDeviceToHost);
-	
+
 	cudaEventCreate(&stop);
 	cudaEventRecord(stop, 0);
 	cudaEventSynchronize(stop);
 	cudaEventElapsedTime(&msecTotal, start, stop);
 	cout << "MatrixMulMatrix GPU time: " << msecTotal << " ms" << endl;
-	PrintMatrix(outputMatrix, inputEntriesUnrounded, outputFeaturesUnrounded, outputFeatures);
+	 PrintMatrix(outputMatrix, inputEntriesUnrounded, outputFeaturesUnrounded, outputFeatures);
 
 	bool same = true;
 	for (uint32_t i = 0; i < inputEntries * outputFeatures; i++) {
 		if (abs(outputMatrix[i] - matrixMulMatrixRef[i]) > 0.001) {
 			same = false;
+			cout << i << " " << outputMatrix[i] << " " << matrixMulMatrixRef[i] << endl;
 			break;
 		}
 	}
@@ -248,14 +249,14 @@ int main() {
 
 	float* matrixMulMatrixTransposedRef = (float*)malloc(inputMatrixBytes);
 	MatrixMulMatrixTransposedCPU(outputMatrix, weightMatrix, matrixMulMatrixTransposedRef, outputFeatures, inputEntries, inputFeatures);
-	
+
 	cudaEventCreate(&stop);
 	cudaEventRecord(stop, 0);
 	cudaEventSynchronize(stop);
 	cudaEventElapsedTime(&msecTotal, start, stop);
 	cout << "MatrixMulMatrixTransposed CPU time: " << msecTotal << " ms" << endl;
-	PrintMatrix(matrixMulMatrixTransposedRef, inputEntriesUnrounded, inputFeaturesUnrounded, inputFeatures);
-	
+	 PrintMatrix(matrixMulMatrixTransposedRef, inputEntriesUnrounded, inputFeaturesUnrounded, inputFeatures);
+
 	free(inputMatrix);
 	free(weightMatrix);
 	free(outputMatrix);
