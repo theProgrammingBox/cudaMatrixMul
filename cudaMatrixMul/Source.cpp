@@ -104,7 +104,22 @@ void MatrixMulMatrixTransposedCPU(float* inputMatrix, float* weightMatrix, float
 	}
 }
 
-__global__ void MatrixMulMatrixGPU(float* inputMatrix, float* weightMatrix, float* outputMatrix, uint32_t inputFeatures, uint32_t outputFeatures)
+//__global__ void MatrixMulMatrixGPU(float* inputMatrix, float* weightMatrix, float* outputMatrix, uint32_t inputFeatures, uint32_t outputFeatures)
+//{
+//	uint32_t blockx = blockIdx.x;
+//	uint32_t blocky = blockIdx.y;
+//	uint32_t threadx = threadIdx.x;
+//
+//	__shared__ float inputSubMatrix[BLOCK_SIZE * BLOCK_SIZE];
+//	float outputColumn[BLOCK_SIZE] = { };
+//	float* inputSubMatrixThreadPos;
+//	float* inputMatrixThreadPos;
+//	float* weightMatrixThreadPos;
+//	float* outputMatrixThreadPos;
+//	float weightValue;
+//}
+
+__global__ void MatrixMulMatrixTransposedGPU(float* inputMatrix, float* weightMatrix, float* outputMatrix, uint32_t inputFeatures, uint32_t outputFeatures)
 {
 	uint32_t blockx = blockIdx.x;
 	uint32_t blocky = blockIdx.y;
@@ -121,38 +136,39 @@ __global__ void MatrixMulMatrixGPU(float* inputMatrix, float* weightMatrix, floa
 	uint32_t inputStartIndex = blocky * (inputFeatures * BLOCK_SIZE);
 	uint32_t inputEndIndex = inputStartIndex + inputFeatures;
 	uint32_t weightStartIndex = blockx * BLOCK_SIZE;
-	uint32_t weightIndexIncrement = outputFeatures * BLOCK_SIZE;
+	uint32_t weightIndexIncrement = inputFeatures * BLOCK_SIZE;
 
 	for (uint32_t inputMatrixIndex = inputStartIndex, weightMatrixIndex = weightStartIndex; inputMatrixIndex < inputEndIndex; inputMatrixIndex += BLOCK_SIZE, weightMatrixIndex += weightIndexIncrement)
 	{
 		inputSubMatrixThreadPos = (inputSubMatrix)+(BLOCK_SIZE * threadx);
 		inputMatrixThreadPos = (inputMatrix)+(inputMatrixIndex + threadx);
-
+		
 #pragma unroll
 		for (uint32_t i = 0; i < BLOCK_SIZE; i++)  inputSubMatrixThreadPos[i] = inputMatrixThreadPos[inputFeatures * i];
 		__syncthreads();
 
 		inputSubMatrixThreadPos = inputSubMatrix;
 		weightMatrixThreadPos = (weightMatrix)+(weightMatrixIndex + threadx);
-
+		
 #pragma unroll
 		for (uint32_t i = 0; i < BLOCK_SIZE; i++)
 		{
 			weightValue = weightMatrixThreadPos[0];
-
+			
 #pragma unroll
 			for (uint32_t j = 0; j < BLOCK_SIZE; j++) outputColumn[j] += inputSubMatrixThreadPos[j] * weightValue;
 			inputSubMatrixThreadPos += BLOCK_SIZE;
-			weightMatrixThreadPos += outputFeatures;
+			weightMatrixThreadPos += inputFeatures;
 		}
 		__syncthreads();
 	}
 	outputMatrixThreadPos = (outputMatrix)+(outputFeatures * BLOCK_SIZE * blocky) + (BLOCK_SIZE * blockx) + (threadx);
-
+	
 #pragma unroll
 	for (uint32_t i = 0; i < BLOCK_SIZE; i++)
 	{
-		outputMatrixThreadPos[0] = outputColumn[i]; outputMatrixThreadPos += outputFeatures;
+		outputMatrixThreadPos[0] = outputColumn[i];
+		outputMatrixThreadPos += outputFeatures;
 	}
 }
 
